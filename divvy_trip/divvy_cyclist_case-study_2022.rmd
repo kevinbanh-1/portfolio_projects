@@ -1,0 +1,700 @@
+---
+title: "Divvy Cyclist Trip Case Study"
+author: "Kevin Banh"
+date: "1/17/2022"
+output:
+  rmdformats::downcute:
+    downcute_theme: "chaos"
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+![](C:\\Users\\kevin\\OneDrive\\Documents\\Portfolio Projects\\Google Analytics\\Capstone\\divvy_logo.jpg){width=75%}
+
+In this case study, we will be focusing on Divvy, a program of the Chicago Department of Transportation and operated by LYFT, focused on providing bikes for users to rent and ride around the city. The service allows users to rent bikes from one station and return it at any other Divvy station. Using secondary data collected by Divvy themselves which was updated on January 6th, 2022, analysis will be done to answer key questions to help Divvy restructure their ad campaign.
+
+
+# Business Task
+
+We are interested in restructuring Divvy's ad campaign to better target and transition casual riders to become Divvy members. Casual riders are people who buy the single-ride pass and the full day pass while Divvy members purchase the annual memberships.
+
+The key business questions that will help us achieve our task are:
+
+1. What is the difference in the riding habits between casual riders and Divvy members?
+
+2. Why would casual riders choose the annual memberships?
+
+3. How can Divvy restructure its marketing program to influence casual riders to become members?
+
+
+# Data Sources
+
+We will be using the data source [https://divvy-tripdata.s3.amazonaws.com/index.html](https://divvy-tripdata.s3.amazonaws.com/index.html) provided by Divvy. We will be using data over the course of 12 months during 2021.
+
+This data source was provided by Divvy. All bike riders are identified by their unique ride_id # thus there is no bias towards one group. 
+
+Some important things to note is that Divvy has removed all bike rides that are less than 60 seconds to eliminate riders who are just having issues docking their bike i.e having a false start in addition to trips made by their own employees. It is possible that people have spent more than 60 seconds since we don't have any data on this thus our data might not be as credible. 
+
+Since this data is updated monthly and is very recent, our analysis will be accurate for the business task at hand.
+
+# Necessary libraries
+```{r}
+# Packages to connect to BigQuery
+library(bigrquery)
+library(DBI)
+
+# Data processing and manipulation
+library(dplyr)
+library(plyr)
+library(readr)
+library(sjmisc)
+
+# Data visualizations
+library(ggplot2)
+library(RColorBrewer)
+```
+
+
+# Getting our data
+
+## Merging all 12 months of data
+```{r, eval = FALSE}
+# Merge all of our csv files over the course of 12 months into one csv file
+cyclist <- list.files(path = "C:\\Users\\kevin\\OneDrive\\Documents\\Portfolio Projects\\Google Analytics\\Capstone",
+                       pattern = "*.csv", full.names = TRUE) %>%
+  lapply(read_csv) %>%
+  bind_rows()
+```
+
+
+
+# Data Cleaning
+
+```{r, eval = FALSE}
+glimpse(cyclist)
+```
+
+
+Already there are several things sticking out. The **started_at** and **ended_at** attributes have both the date and time for each record. We will need to split this data up into separate column so that the analysis process is easier.
+
+Another problem is **start_station_name**, **start_station_id**, and **end_station_name**, **end_station_id**. These attributes from a glance already have quite a bit of null values so we might delete these attributes all together since we don't need them to answer our business question.
+
+The identification attributes (**ride_id**, **start_station_id**, **end_station_id**) should be factors as these are unique identifiers.
+
+
+
+
+
+```{r,eval = FALSE}
+# Convert to dataframe
+cyclist_df <- cyclist %>%
+  as.data.frame()
+
+# ride_id must be 16 characters
+cyclist_df %>%
+  filter(nchar(ride_id) > 16)
+```
+
+No ride_id's have more than 16 characters.
+
+
+```{r, eval = FALSE}
+# Convert started_at and ended_at from date time to date
+dates_to_convert <- c("started_at", "ended_at")
+
+# Hold time portion of datetime
+time_started <- format(cyclist_df$started_at, "%H:%M:%S")
+time_ended <- format(cyclist_df$ended_at, "%H:%M:%S")
+
+# Hold date portions of datetime
+date_started <- as.Date(cyclist_df$started_at)
+date_ended <- as.Date(cyclist_df$ended_at)
+
+
+# Add these new split date and time variables and delete the pre-existing ones as well as ...1 column
+cyclist_df <- cyclist_df %>%
+  mutate(time_started = time_started, 
+         time_ended = time_ended, 
+         date_started = date_started, 
+         date_ended = date_ended) %>%
+  select(-c("started_at", "ended_at"))
+
+
+glimpse(cyclist_df)
+```
+
+
+
+```{r, eval = FALSE}
+for(i in 1:dim(cyclist_df)[2]){
+  # If character field then check if string is empty (trim string first)
+  # If numeric then check if na or NaN value
+  # Sum all of the values and print out
+  col = cyclist_df[,i]
+  is.date <- function(x) inherits(x, 'date') # Check if class is Date
+  print(paste0(names(cyclist_df)[i], ": ",ifelse(is.numeric(col),
+                                                  sum(is.na(col)), 
+                                                  ifelse(is.character(col),
+                                                         count(col == "NA")[2,2], #[2,2] index shows the # of TRUEs there are. NA means no NA values
+                                                         ifelse(is.date(col),
+                                                                count(trimws(col) == "")[2,2], 
+                                                                "No null/empty values found")))))
+}
+
+
+```
+
+The variables **start_station_name, start_station_id, end_station_name, end_station_id** have a very large amount of NA values. Since we don't need these attributes for our analysis, we will delete them from the dataset. The attributes **end_lat, end_lng** have a few NA values as well. Since these are latitude and longitude coordinates, we cannot just do mean or median imputation thus we will simply delete the NA records from our dataframe. 
+
+```{r, eval = FALSE}
+# Remove columns containing we found that have too many NA values
+cyclist_df[, c("start_station_name", "start_station_id", "end_station_name", "end_station_id")] <- list(NULL) 
+
+# Remove entire records containing end_lat and end_lng NA values
+cyclist_df <- cyclist_df[!is.na(cyclist_df$end_lat) & !is.na(cyclist_df$end_lng),]
+
+# Verify that these values are gone
+count(is.na(cyclist_df$end_lat) & is.na(cyclist_df$end_lng))
+
+glimpse(cyclist_df)
+
+```
+
+
+```{r, eval = FALSE}
+# Find duplicates 
+sum(duplicated(cyclist_df))
+```
+
+There are no duplicate rows to be found.
+
+
+```{r, eval = FALSE}
+# Write a csv file for our merged data
+write.csv(cyclist_df, file = "2021-divvy-tripdata.csv")
+```
+
+
+# Add our data to BigQuery database
+
+Before adding our data to our BigQuery, we will need to store this csv file in a Google Cloud Storage bucket due to the size being too large. After we've done so,
+import our data into a table in the database.
+
+
+# Connect to our BigQuery database
+
+```{r}
+# Establish connection to our database
+con <- dbConnect(
+  bigrquery::bigquery(),
+  project = "portfolio-projects-338303",
+  dataset = "cyclist_trip",
+  billing = "portfolio-projects-338303"
+)
+
+# Find all of the tables in the database
+dbListTables(con)
+cyclist <- dplyr::tbl(con, "2021_divvy_tripdata")
+```
+
+
+# EDA
+
+
+```{r}
+num_riders_mem_casual <- dbGetQuery(con,
+           "SELECT DISTINCT member_casual, COUNT(*) as num_riders
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            GROUP BY member_casual") 
+```
+
+
+```{r}
+num_riders_mem_casual %>%
+  ggplot(aes(x = member_casual, y = num_riders, fill = member_casual)) +
+  geom_bar(stat = "identity") + 
+  geom_text(aes(label = num_riders), vjust = 1.5, color = "black") + 
+  scale_fill_manual(values = c("olivedrab3", "azure4")) + 
+  labs(title = "Total # of casual and member riders") + 
+  theme(legend.position = "none", 
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.background = element_blank(),
+        axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  xlab("Type of rider") + 
+  ylab("# of riders")
+```
+
+There are more Divvy members (members who purchased the annual membership) than casual members who buy a one-time or 24-hour pass.
+
+
+
+
+```{r}
+bike_type_member <- dbGetQuery(con,
+           "SELECT 
+                  member_casual, 
+                  rideable_type, 
+                  COUNT(*)/(SELECT COUNT(*) 
+                            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` 
+                            WHERE member_casual = 'member') as percentage_riders
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            WHERE member_casual = 'member'
+            GROUP BY rideable_type, member_casual") 
+```
+
+```{r}
+bike_type_member %>%
+  ggplot(aes(x = rideable_type, y = percentage_riders, fill = member_casual)) + 
+  geom_bar(stat = "identity") + 
+  geom_text(aes(label = paste0(round(percentage_riders*100,1), "%")), vjust = 1.5, color = "black") + 
+  scale_y_continuous(labels = function(x) paste0(x*100, "%")) + 
+  scale_fill_manual(values = "azure4") +
+  labs(title = "Preferred type of bike for member riders") + 
+  theme(legend.position = "none",
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  xlab("Type of bike") + 
+  ylab("% of member riders")
+```
+
+
+Divvy members tend to prefer electric bikes more than classic bikes. Notably, no members like to ride docked bikes. Electric bikes can be docked to any Divvy station so perhaps this option is preferred due to its flexibility for members who are out and about frequently. 
+
+
+
+```{r}
+bike_type_casual <- dbGetQuery(con,
+           "SELECT 
+                  member_casual, 
+                  rideable_type, 
+                  COUNT(*)/(SELECT COUNT(*) 
+                            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` 
+                            WHERE member_casual = 'casual') as percentage_riders
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            WHERE member_casual = 'casual'
+            GROUP BY rideable_type, member_casual")
+```
+
+```{r}
+bike_type_casual %>%
+  ggplot(aes(x = rideable_type, y = percentage_riders, fill = member_casual)) + 
+  geom_bar(stat = "identity") + 
+  geom_text(aes(label = paste0(round(percentage_riders*100,1), "%")), vjust = 1.5, color = "black") + 
+  scale_y_continuous(labels = function(x) paste0(x*100, "%")) + 
+  scale_fill_manual(values = "olivedrab3") +
+  labs(title = "Preferred type of bike for casual riders") + 
+  theme(legend.position = "none", 
+        axis.title.x = element_text(hjust = 0), 
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  xlab("Type of bike") + 
+  ylab("% of casual riders")
+```
+
+
+The vast majority of casual members like to ride electric bikes over docked and classic bikes. 
+
+
+```{r}
+mem_casual_bike <- dbGetQuery(con,
+           "SELECT member_casual, rideable_type, COUNT(*) as num_riders
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            GROUP BY rideable_type, member_casual")
+```
+
+```{r}
+mem_casual_bike %>%
+  ggplot(aes(x = rideable_type, y = num_riders, fill = member_casual)) + 
+  geom_bar(stat = "identity") + 
+  geom_text(aes(label = num_riders), color = "black",position = position_stack(vjust = .5)) +
+  scale_fill_manual(values = c("olivedrab3", "azure4")) +
+  labs(title = "Preferred type of bike for riders") + 
+  theme(legend.position = "none", 
+        axis.title.x = element_text(hjust = 0), 
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  xlab("Type of bike") + 
+  ylab("# of riders") + 
+  annotate("text", x = 3, y = 3000000, label = "Casual", color = "olivedrab3", size = 5, fontface = 2) +
+  annotate("text", x = 3, y = 2650000, label = "Member", color = "azure4", size = 5, fontface = 2)
+```
+
+
+
+```{r}
+distance_table <- dbGetQuery(con,
+                             "WITH output_1 AS (
+                                SELECT 
+                                  ST_GEOGPOINT(start_station.start_lat, start_station.start_lng) AS start,
+                                  start_station.member_casual,
+                                  ST_GEOGPOINT(SAFE_CAST(end_station.end_lat AS FLOAT64), SAFE_CAST(end_station.end_lng AS FLOAT64)) AS end_stat,
+                                  ST_DISTANCE(ST_GEOGPOINT(start_station.start_lat,start_station.start_lng),
+                                              ST_GEOGPOINT(SAFE_CAST(end_station.end_lat AS FLOAT64), SAFE_CAST(end_station.end_lng AS FLOAT64)))
+                                              AS total_distance_traveled
+                                FROM 
+                                  `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` AS start_station
+                                JOIN
+                                  `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` AS end_station
+                                ON start_station.ride_id = end_station.ride_id
+                                WHERE end_station.end_lat IS NOT NULL
+                                AND end_station.end_lng IS NOT NULL)
+                                
+                                SELECT
+                                  DISTINCT member_casual,
+                                  AVG(total_distance_traveled) as average_distance_traveled
+                                FROM output_1
+                                GROUP BY member_casual")
+```
+
+```{r}
+distance_table %>%
+  ggplot(aes(x = member_casual, y = average_distance_traveled, fill = member_casual)) + 
+  geom_bar(stat = "identity")+ 
+  geom_text(aes(label = round(average_distance_traveled, 1)), vjust = 1.5, color = "black") +
+  scale_fill_manual(values = c("olivedrab3", "azure4")) +
+  labs(title = "Average distance traveled for casual and member riders") + 
+  theme(legend.position = "none", 
+        axis.title.x = element_text(hjust = 0), 
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  xlab("Type of rider") + 
+  ylab("Average distance traveled")
+```
+
+
+Surprisingly, casual riders travel longer distances on average than members. Perhaps members use bikes on short trips more frequently than casual riders who are possibly tourists who will travel longer distances.
+
+
+```{r}
+weekly_riders <- dbGetQuery(con,
+           "SELECT 
+              FORMAT_DATE('%a', date_started) as weekday_started, 
+              COUNT(*) as num_riders,
+              member_casual
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            GROUP BY weekday_started, member_casual
+            ORDER BY 
+              CASE
+                WHEN weekday_started = 'Sun' THEN 1
+                WHEN weekday_started = 'Mon' THEN 2
+                WHEN weekday_started = 'Tue' THEN 3
+                WHEN weekday_started = 'Wed' THEN 4
+                WHEN weekday_started = 'Thu' THEN 5
+                WHEN weekday_started = 'Fri' THEN 6
+                WHEN weekday_started = 'Sat' THEN 7
+              END ASC
+            "
+           )
+```
+
+```{r}
+weekly_riders %>%
+  ggplot(aes(x = factor(weekday_started, levels = unique(weekday_started)), y = num_riders, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.5) +
+  scale_color_manual(values = c("olivedrab3", "azure4")) + 
+  theme(axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        panel.background = element_blank(),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 40),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080")) + 
+  annotate("text", x = 7.6, y = 440000, label = "Member", color = "azure4", size = 5, fontface = 2) + 
+  annotate("text", x = 7.6, y = 560000, label = "Casual", color = "olivedrab3", size = 5, fontface = 2) + 
+  labs(title = "# of casual and member riders during the week", y = "# of riders") + 
+  xlab("2021") + 
+  coord_cartesian(clip = "off")
+```
+
+
+Member riders have a steady amount of trips throughout the week while casual riders have very low periods during the week while having their peak periods during the weekend.
+
+```{r}
+monthly_riders <- dbGetQuery(con,
+           "SELECT
+              FORMAT_DATE('%b', date_started) as month_started,
+              COUNT(*) as num_riders,
+              member_casual
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            GROUP BY month_started, member_casual
+            ORDER BY 
+              CASE
+                WHEN month_started = 'Jan' THEN 1
+                WHEN month_started = 'Feb' THEN 2
+                WHEN month_started = 'Mar' THEN 3
+                WHEN month_started = 'Apr' THEN 4
+                WHEN month_started = 'May' THEN 5
+                WHEN month_started = 'Jun' THEN 6
+                WHEN month_started = 'Jul' THEN 7
+                WHEN month_started = 'Aug' THEN 8
+                WHEN month_started = 'Sep' THEN 9
+                WHEN month_started = 'Oct' THEN 10
+                WHEN month_started = 'Nov' THEN 11
+                WHEN month_started = 'Dec' THEN 12
+              END ASC")
+
+```
+
+```{r}
+monthly_riders %>%
+  ggplot(aes(x = factor(month_started, levels = unique(month_started)), y = num_riders, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.5) + 
+  scale_color_manual(values = c("olivedrab3", "azure4")) + 
+  theme(axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        legend.position = "none",
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 40),
+        panel.background = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080")) + 
+  annotate("text", x = 13, y = 160000, label = "Member", color = "azure4", size = 5, fontface = 2) + 
+  annotate("text", x = 13, y = 60000, label = "Casual", color = "olivedrab3", size = 5, fontface = 2) + 
+  labs(title = "# of casual and member riders during 2021", y = "# of riders") + 
+  xlab("2021") + 
+  coord_cartesian(clip = "off")
+
+```
+
+
+
+June and July have the peak # of both member and casual members, which is most likely due to this period being peak summertime. We can leverage this in our advertising campaign.
+
+
+
+```{r}
+total_distance_yearly <- dbGetQuery(con,
+            "WITH output_1 AS (
+                SELECT
+                  FORMAT_DATE('%b', start_station.date_started) as month_started,
+                  start_station.member_casual as member_casual,
+                  ST_DISTANCE(ST_GEOGPOINT(start_station.start_lat,start_station.start_lng),
+                              ST_GEOGPOINT(SAFE_CAST(end_station.end_lat AS FLOAT64), SAFE_CAST(end_station.end_lng AS FLOAT64)))
+                              AS total_distance_traveled
+                FROM 
+                  `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` AS start_station
+                JOIN
+                  `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata` AS end_station
+                ON start_station.ride_id = end_station.ride_id)
+                                
+                SELECT 
+                  month_started,
+                  member_casual,
+                  ROUND(AVG(total_distance_traveled), 1) as total_distance_traveled
+                  FROM output_1
+                  GROUP BY month_started, member_casual
+                  ORDER BY
+                    CASE
+                      WHEN month_started = 'Jan' THEN 1
+                      WHEN month_started = 'Feb' THEN 2
+                      WHEN month_started = 'Mar' THEN 3
+                      WHEN month_started = 'Apr' THEN 4
+                      WHEN month_started = 'May' THEN 5
+                      WHEN month_started = 'Jun' THEN 6
+                      WHEN month_started = 'Jul' THEN 7
+                      WHEN month_started = 'Aug' THEN 8
+                      WHEN month_started = 'Sep' THEN 9
+                      WHEN month_started = 'Oct' THEN 10
+                      WHEN month_started = 'Nov' THEN 11
+                      WHEN month_started = 'Dec' THEN 12
+                      END ASC")
+```
+
+```{r}
+total_distance_yearly %>%
+  ggplot(aes(x = factor(month_started, levels = unique(month_started)), y = total_distance_traveled, group = member_casual, color = member_casual)) +
+  geom_line(size = 1.5) + 
+  scale_color_manual(values = c("olivedrab3", "azure4")) + 
+  theme(axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 50),
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080")) + 
+  annotate("text", 
+           x = 13.2, 
+           y = 1370, 
+           label = "Member", 
+           color = "azure4", 
+           size = 5, 
+           fontface = 2) +
+  annotate("text", 
+           x = 13.2, 
+           y = 1470, 
+           label = "Casual", 
+           color = "olivedrab3", 
+           size = 5, 
+           fontface = 2) + 
+  annotate("text", 
+           x = 7, 
+           y = 1610, 
+           label = "Bike the Drive", 
+           size = 4, 
+           fontface = 2) +
+  geom_segment(aes(x = 8.25,
+                   y = 1610,
+                   xend = 8.75,
+                   yend = 1610)) +
+  labs(title = "Average distance traveled by casual and member riders during 2021", y = "Total distance traveled") + 
+  scale_x_discrete(drop=FALSE) + 
+  coord_cartesian(clip = "off") + 
+  xlab("2021")
+```
+
+
+
+
+```{r}
+time_of_day <- dbGetQuery(con,
+           "SELECT 
+              FORMAT_DATE('b', date_started) as week_started,
+              member_casual,
+              CASE
+                WHEN EXTRACT(HOUR FROM time_started) BETWEEN 5 AND 12 THEN 'Morning'
+                WHEN EXTRACT(HOUR FROM time_started) BETWEEN 13 AND 17 THEN 'Afternoon'
+                WHEN EXTRACT(HOUR FROM time_started) BETWEEN 18 AND 21 THEN 'Evening'
+                ELSE 'Night'
+              END AS ride_part_of_the_day
+            FROM `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+            GROUP BY date_started, member_casual, time_started
+           "
+           )
+```
+
+```{r}
+time_of_day %>%
+  ggplot(aes(x = factor(ride_part_of_the_day, levels = c("Morning", "Afternoon", "Evening", "Night")), fill = member_casual)) + 
+  geom_bar() + 
+  scale_fill_manual(values = c("olivedrab3", "azure4")) + 
+  labs(title = "# of riders during different parts of the day") + 
+  theme(axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        panel.background = element_blank(),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  ylab("# of riders") + 
+  xlab("Time of day") +
+  geom_text(stat = "count", aes(label = ..count..), position = position_stack(vjust = .5), color = "black") + 
+  annotate("text", x = 4, y = 1500000, label = "Casual", color = "olivedrab3", size = 5, fontface = 2) + 
+  annotate("text", x = 4, y = 1350000, label = "Member", color = "azure4", size = 5, fontface = 2)
+```
+
+
+The afternoon (1:00 p.m. to 5:00 p.m) has the peak # of riders while the nighttime (10:00 p.m. to 4:00 a.m) has the least amount of riders.
+
+
+```{r}
+weekly_distribution <- dbGetQuery(con,
+            "SELECT
+              FORMAT_DATE('%a', date_started) as day_of_week,
+              FORMAT_DATE('%b', date_started) as month_started,
+              member_casual, 
+              COUNT(*) as count
+             FROM 
+              `portfolio-projects-338303.cyclist_trip.2021_divvy_tripdata`
+              GROUP BY day_of_week, month_started, member_casual
+              ORDER BY
+              CASE
+                  WHEN month_started = 'Jan' THEN 1
+                  WHEN month_started = 'Feb' THEN 2
+                  WHEN month_started = 'Mar' THEN 3
+                  WHEN month_started = 'Apr' THEN 4
+                  WHEN month_started = 'May' THEN 5
+                  WHEN month_started = 'Jun' THEN 6
+                  WHEN month_started = 'Jul' THEN 7
+                  WHEN month_started = 'Aug' THEN 8
+                  WHEN month_started = 'Sep' THEN 9
+                  WHEN month_started = 'Oct' THEN 10
+                  WHEN month_started = 'Nov' THEN 11
+                  WHEN month_started = 'Dec' THEN 12
+                      END ASC ")
+```
+
+```{r}
+weekly_distribution %>% 
+  ggplot(aes(x = factor(month_started, levels = unique(month_started)), y = count, fill = member_casual)) + 
+  geom_bar(stat = "identity") + 
+  facet_wrap(~factor(day_of_week, levels = c("Sun","Mon", "Tue", "Wed", "Thu", "Fri", "Sat"))) + 
+  labs(title = "Distribution for each day of the week over 12 months") + 
+  theme(axis.title.x = element_text(hjust = 0),
+        axis.title.y = element_text(hjust = 1),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.position = "none",
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = .5, hjust = 1),
+        axis.title = element_text(color = "#808080"),
+        plot.title = element_text(color = "#808080"),
+        plot.margin = margin(t = 10, b = 10, l = 10, r = 10)) + 
+  scale_fill_manual(values = c("olivedrab3", "azure4")) + 
+  xlab("2021") + 
+  ylab("# of riders")
+```
+
+
+For all days in the week, there is a fairly normal, bell-shaped curve to our distributions. There are a low # of riders at the beginning of the year when it's cold and once summer comes around, there are more riders. 
+
+
+## Conclusions from our EDA
+
+1. The # of member riders are consistent throughout the week while casual riders are largely concentrated around the weekend with low # of riders throughout the week.
+
+2. The # of member riders and casual readers during each month follow the same trend: they both have peak riders during the summertime in June and July.
+
+3. The average distance traveled by casual riders is more than that of member riders, especially in the month of September due to the Bike the Drive event.
+
+4. Classic bikes are preferred by both casual and member riders with electric being a close second. Docked bikes are not used at all for members while only a few use it for casual members. 
+
+
+
+
+
+# Recommendations for marketing strategy
+
+1. Offer **promotional deals** for trips that cover **more distance** for member riders.
+
+2. Offer **promotional deals** for trips during the period of June and July for member riders.
+
+3. Highlight more **bicycling races/fundraisers** throughout the year.
